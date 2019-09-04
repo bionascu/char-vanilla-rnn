@@ -3,9 +3,10 @@
 
 # DD2424 Assignment 4
 
-import matplotlib.pyplot as plt
 import numpy as np
 import copy
+import pandas as pd
+
 
 
 class Parameters:
@@ -81,10 +82,68 @@ class RNN (Parameters):
 
         return grads
 
-    def gradient_check(self):
-        raise NotImplementedError("Should have implemented this")
+    def naive_num_gradient(self, x, y, seq_idx, h0):
+        """
+        A naive implementation of the numerical gradient of the cost function.
+        """
+        # evaluate function value at original point
+        _, _, _, _, fx = self.forward_pass(x, y, h0)  # evaluate f(x)
+        h = 1e-04
+        # evaluate function at x+h
+        old_value = self.V[seq_idx]
+        self.V[seq_idx] = old_value + h  # increment by h
+        _, _, _, _, fxh = self.forward_pass(x, y, h0)  # evaluate f(x + h)
+        # restore to previous value (very important!)
+        self.V[seq_idx] = old_value
+        # compute the partial derivative
+        grad = (fxh - fx) / h  # the slope
+        return grad
 
-    def train(self, book_data, book_chars, syn_text_length, n_epochs):
+    def centered_num_gradient(self, x, y, seq_idx, h0):
+        """
+        A more accurate implementation of the numerical gradient of the cost
+        function using the centered difference formula.
+        """
+        # evaluate function value at original point
+        _, _, _, _, fx = self.forward_pass(x, y, h0)  # evaluate f(x)
+        h = 1e-04
+        old_value = self.V[seq_idx]
+        # evaluate function at x+h
+        self.V[seq_idx] = old_value + h  # increment by h
+        _, _, _, _, fxh = self.forward_pass(x, y, h0)  # evalute f(x + h)
+        # evaluate function at x-h
+        self.V[seq_idx] = old_value - h  # decrement by h
+        _, _, _, _, fx_h = self.forward_pass(x, y, h0)  # evalute f(x - h)
+        # restore to previous value
+        self.V[seq_idx] = old_value
+        # compute the partial derivative
+        grad = (fxh - fx_h) / (2 * h)  # the slope
+        return grad
+
+    def relative_error(self, a, b):
+        """
+        Compute relative error between two values.
+        """
+        return np.abs(a - b) / np.maximum(0, np.abs(a) + np.abs(b))
+
+    def gradient_check(self, x, y, h0):
+
+        """
+        Perform a gradient check on a sample of 1000 parameters and report the
+        percentage of relative errors below a threshold (1e-06).
+        """
+        X, A, H, scores, loss = self.forward_pass(x, y, h0)
+        grads = self.backward_pass(X, y, A, H, scores)
+        # total = 0
+        for seq_idx in range(self.seq_length):
+            # grad_V_num = self.naive_num_gradient(x, y, seq_idx, h0)
+            grad_V_num = self.centered_num_gradient(x, y, seq_idx, h0)
+            err = self.relative_error(grads.V[seq_idx], grad_V_num)
+            print "seq idx {}:\t{}".format(seq_idx, err)
+            # if err < 1e-06: total += 1
+        # return float(total) / float(num_iter)
+
+    def train(self, book_data, book_chars, syn_text_len, n_epochs, check_grad):
         """
         Train the network using the vanilla version of mini-batch gradient
         descent and AdaGrad.
@@ -93,6 +152,10 @@ class RNN (Parameters):
         ind_to_char = {ind: char for ind, char in enumerate(book_chars)}
         smooth_loss = -np.log(1.0 / len(book_chars)) * self.seq_length  # it 0
         smooth_loss_vector = []  # save smooth loss value for plotting
+        it_vector = []  # save num steps
+        min_loss = 10000
+        best_seq = ''
+        best_it = 0
 
         it = 0  # iterations / update steps
         for ep in range(n_epochs):
@@ -103,27 +166,44 @@ class RNN (Parameters):
             while e + self.seq_length + 1 < len(book_data):
 
                 # Define input and label sequences
-                x = [char_to_ind[ch] for ch in book_data[e:e + self.seq_length + 1]]
-                y = [char_to_ind[ch] for ch in book_data[e + 1:e + self.seq_length + 2]]
+                x = [char_to_ind[ch] for ch in
+                     book_data[e:e + self.seq_length + 1]]
+                y = [char_to_ind[ch] for ch in
+                     book_data[e + 1:e + self.seq_length + 2]]
 
                 # Sample from the model
-                if it % 500 == 0:
+                if it % 10000 == 0:
                     x0 = np.zeros((self.K, 1))
                     x0[x[0]] = 1
-                    ind_seq = synthesize_text(self, h0, x0, syn_text_length)
+                    ind_seq = synthesize_text(self, h0, x0, syn_text_len)
                     result = ''.join(ind_to_char[ind] for ind in ind_seq)
+                    print '(before) iter %d' % it
                     print '%s\n' % result
 
                 # Forward and backward pass
                 X, A, H, P, loss = self.forward_pass(x, y, h0)
                 h0 = H[-1]
                 smooth_loss = .999 * smooth_loss + .001 * loss
-                smooth_loss_vector.append(smooth_loss)
                 grad = self.backward_pass(X, y, A, H, P)
 
-                # Print loss
+                # Save loss
                 if it % 100 == 0:
-                    print 'iter %d:\t loss: %f \n' % (it, smooth_loss)
+                    smooth_loss_vector.append(smooth_loss[0])
+                    it_vector.append(it)
+
+                # Print loss
+                if it % 10000 == 0:
+                    print '(after) iter %d:\t smooth_loss: %f \n' % \
+                          (it, smooth_loss)
+
+                # Save best model passage
+                if smooth_loss < min_loss:
+                    min_loss = smooth_loss
+                    x0 = np.zeros((self.K, 1))
+                    x0[x[0]] = 1
+                    ind_seq = synthesize_text(self, h0, x0, 1000)
+                    best_seq = ''.join(ind_to_char[ind] for ind in ind_seq)
+                    best_it = it
 
                 # Vanilla SGD update step using AdaGrad
                 for param, grad_param, mem in zip([self.U, self.V, self.W, self.b, self.c],
@@ -135,7 +215,20 @@ class RNN (Parameters):
                 e += self.seq_length
                 it += 1
 
-        return smooth_loss_vector
+            print 'Done with epoch: %d' % ep
+
+            if check_grad:
+                ii = int(len(book_data) / 2)
+                x_ = [char_to_ind[ch] for ch in
+                     book_data[ii:ii + self.seq_length + 1]]
+                y_ = [char_to_ind[ch] for ch in
+                     book_data[ii + 1:ii + self.seq_length + 2]]
+                self.gradient_check(x_, y_, np.zeros((self.m, 1)))
+
+        print '\nPassage from best model (it %d, loss %f):\n%s\n' % \
+              (best_it, min_loss, best_seq)
+
+        return it_vector, smooth_loss_vector
 
 
 def sample(p):
@@ -180,15 +273,6 @@ def synthesize_text(rnn, h0, x0, n):
     return seq
 
 
-def plot_loss(train_loss, n_epochs):
-    epochs = np.arange(n_epochs + 1)
-    plt.plot(epochs, train_loss, label="smooth loss")
-    plt.xlabel("Epochs")
-    plt.ylabel("Loss")
-    plt.legend(loc='upper right', shadow=True)
-    plt.show()
-
-
 def run():
     """
     Train a vanilla RNN network and plot results.
@@ -201,12 +285,12 @@ def run():
     print 'The text has %d characters, %d unique.' % (data_size, chars_size)
 
     # Set hyperparameters
-    m = 100  # dimensionality of the hidden state
-    eta = 0.01  # learning rate (default 0.1)
-    seq_length = 25  # length of input sequences used for training (default 25)
+    m = 100  # 100  # dimensionality of the hidden state
+    eta = 0.1  # learning rate (default 0.1)
+    seq_length = 20  # length of input sequences used for training (default 25)
 
     # Set other gradient descent parameters
-    n_epochs = 1
+    n_epochs = 10
 
     # Initialize parameters as Gaussian random values (mean = 0 & s.d. = 0.01)
     K = chars_size
@@ -222,20 +306,16 @@ def run():
     rnn = RNN(copy.deepcopy(U), copy.deepcopy(W), copy.deepcopy(V),
               copy.deepcopy(b), copy.deepcopy(c), eta, seq_length)
 
-    # # Gradient check
-    # for layer_idx in range(L):
-    # 	# Weights
-    # 	print nn.gradient_check(train_data[:,:n_batch], train_labels[:n_batch],
-    # 		"weight", layer_idx, batch_norm=True)
-    # 	# Biases - when using batch norm only last layer matters
-    # 	print nn.gradient_check(train_data[:,:n_batch], train_labels[:n_batch],
-    # 		"bias", layer_idx, batch_norm=True)
-
     # Train network
-    train_loss = rnn.train(book_data, book_chars, 200, n_epochs)
+    check = False  # check gradients numerically
+    steps, train_loss = rnn.train(book_data, book_chars, 200, n_epochs, check)
 
-    # # Plot loss
-    plot_loss(train_loss, n_epochs)
+    # Save update steps and smooth_loss
+    columns = ['update steps', 'smooth loss']
+    df = pd.DataFrame(columns=columns)
+    df['update steps'] = np.array(steps)
+    df['smooth loss'] = np.array(train_loss)
+    df.to_csv('results_eta' + str(eta) + '_seqlen' + str(seq_length) + '.csv')
 
 
 if __name__ == '__main__':
